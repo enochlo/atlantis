@@ -16,10 +16,12 @@ package events_test
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/runatlantis/atlantis/server/core/db"
+	"github.com/runatlantis/atlantis/server/events/vcs"
 	"github.com/runatlantis/atlantis/server/events/yaml/valid"
 	"github.com/runatlantis/atlantis/server/logging"
 
@@ -76,7 +78,6 @@ func setup(t *testing.T) *vcsmocks.MockClient {
 	workingDir = mocks.NewMockWorkingDir()
 	pendingPlanFinder = mocks.NewMockPendingPlanFinder()
 	commitUpdater = mocks.NewMockCommitStatusUpdater()
-
 	tmp, cleanup := TempDir(t)
 	defer cleanup()
 	defaultBoltDB, err := db.New(tmp)
@@ -130,6 +131,8 @@ func setup(t *testing.T) *vcsmocks.MockClient {
 		defaultBoltDB,
 	)
 
+	pullReqStatusFetcher := vcs.NewPullReqStatusFetcher(vcsClient)
+
 	applyCommandRunner = events.NewApplyCommandRunner(
 		vcsClient,
 		false,
@@ -144,6 +147,7 @@ func setup(t *testing.T) *vcsmocks.MockClient {
 		parallelPoolSize,
 		SilenceNoProjects,
 		false,
+		pullReqStatusFetcher,
 	)
 
 	approvePoliciesCommandRunner = events.NewApprovePoliciesCommandRunner(
@@ -182,6 +186,8 @@ func setup(t *testing.T) *vcsmocks.MockClient {
 
 	When(preWorkflowHooksCommandRunner.RunPreHooks(matchers.AnyPtrToEventsCommandContext())).ThenReturn(nil)
 
+	globalCfg := valid.NewGlobalCfgFromArgs(valid.GlobalCfgArgs{})
+
 	ch = events.DefaultCommandRunner{
 		VCSClient:                     vcsClient,
 		CommentCommandRunnerByCmd:     commentCommandRunnerByCmd,
@@ -190,6 +196,7 @@ func setup(t *testing.T) *vcsmocks.MockClient {
 		GitlabMergeRequestGetter:      gitlabGetter,
 		AzureDevopsPullGetter:         azuredevopsGetter,
 		Logger:                        logger,
+		GlobalCfg:                     globalCfg,
 		AllowForkPRs:                  false,
 		AllowForkPRsFlag:              "allow-fork-prs-flag",
 		Drainer:                       drainer,
@@ -233,6 +240,42 @@ func TestRunCommentCommand_GithubPullParseErr(t *testing.T) {
 
 	ch.RunCommentCommand(fixtures.GithubRepo, &fixtures.GithubRepo, nil, fixtures.User, fixtures.Pull.Num, nil)
 	vcsClient.VerifyWasCalledOnce().CreateComment(fixtures.GithubRepo, fixtures.Pull.Num, "`Error: extracting required fields from comment data: err`", "")
+}
+
+func TestRunCommentCommand_TeamAllowListChecker(t *testing.T) {
+	t.Run("nil checker", func(t *testing.T) {
+		vcsClient := setup(t)
+		// by default these are false so don't need to reset
+		ch.TeamAllowlistChecker = nil
+		var pull github.PullRequest
+		modelPull := models.PullRequest{
+			BaseRepo: fixtures.GithubRepo,
+			State:    models.OpenPullState,
+		}
+		When(githubGetter.GetPullRequest(fixtures.GithubRepo, fixtures.Pull.Num)).ThenReturn(&pull, nil)
+		When(eventParsing.ParseGithubPull(&pull)).ThenReturn(modelPull, modelPull.BaseRepo, fixtures.GithubRepo, nil)
+
+		ch.RunCommentCommand(fixtures.GithubRepo, nil, nil, fixtures.User, fixtures.Pull.Num, &events.CommentCommand{Name: models.PlanCommand})
+		vcsClient.VerifyWasCalled(Never()).GetTeamNamesForUser(fixtures.GithubRepo, fixtures.User)
+		vcsClient.VerifyWasCalledOnce().CreateComment(fixtures.GithubRepo, modelPull.Num, "Ran Plan for 0 projects:\n\n\n\n", "plan")
+	})
+
+	t.Run("no rules", func(t *testing.T) {
+		vcsClient := setup(t)
+		// by default these are false so don't need to reset
+		ch.TeamAllowlistChecker = &events.TeamAllowlistChecker{}
+		var pull github.PullRequest
+		modelPull := models.PullRequest{
+			BaseRepo: fixtures.GithubRepo,
+			State:    models.OpenPullState,
+		}
+		When(githubGetter.GetPullRequest(fixtures.GithubRepo, fixtures.Pull.Num)).ThenReturn(&pull, nil)
+		When(eventParsing.ParseGithubPull(&pull)).ThenReturn(modelPull, modelPull.BaseRepo, fixtures.GithubRepo, nil)
+
+		ch.RunCommentCommand(fixtures.GithubRepo, nil, nil, fixtures.User, fixtures.Pull.Num, &events.CommentCommand{Name: models.PlanCommand})
+		vcsClient.VerifyWasCalled(Never()).GetTeamNamesForUser(fixtures.GithubRepo, fixtures.User)
+		vcsClient.VerifyWasCalledOnce().CreateComment(fixtures.GithubRepo, modelPull.Num, "Ran Plan for 0 projects:\n\n\n\n", "plan")
+	})
 }
 
 func TestRunCommentCommand_ForkPRDisabled(t *testing.T) {
@@ -402,6 +445,40 @@ func TestRunCommentCommand_ClosedPull(t *testing.T) {
 
 	ch.RunCommentCommand(fixtures.GithubRepo, &fixtures.GithubRepo, nil, fixtures.User, fixtures.Pull.Num, nil)
 	vcsClient.VerifyWasCalledOnce().CreateComment(fixtures.GithubRepo, modelPull.Num, "Atlantis commands can't be run on closed pull requests", "")
+}
+
+func TestRunCommentCommand_MatchedBranch(t *testing.T) {
+	t.Log("if a command is run on a pull request which matches base branches run plan successfully")
+	vcsClient := setup(t)
+
+	ch.GlobalCfg.Repos = append(ch.GlobalCfg.Repos, valid.Repo{
+		IDRegex:     regexp.MustCompile(".*"),
+		BranchRegex: regexp.MustCompile("^main$"),
+	})
+	var pull github.PullRequest
+	modelPull := models.PullRequest{BaseRepo: fixtures.GithubRepo, BaseBranch: "main"}
+	When(githubGetter.GetPullRequest(fixtures.GithubRepo, fixtures.Pull.Num)).ThenReturn(&pull, nil)
+	When(eventParsing.ParseGithubPull(&pull)).ThenReturn(modelPull, modelPull.BaseRepo, fixtures.GithubRepo, nil)
+
+	ch.RunCommentCommand(fixtures.GithubRepo, nil, nil, fixtures.User, fixtures.Pull.Num, &events.CommentCommand{Name: models.PlanCommand})
+	vcsClient.VerifyWasCalledOnce().CreateComment(fixtures.GithubRepo, modelPull.Num, "Ran Plan for 0 projects:\n\n\n\n", "plan")
+}
+
+func TestRunCommentCommand_UnmatchedBranch(t *testing.T) {
+	t.Log("if a command is run on a pull request which doesn't match base branches do not comment with error")
+	vcsClient := setup(t)
+
+	ch.GlobalCfg.Repos = append(ch.GlobalCfg.Repos, valid.Repo{
+		IDRegex:     regexp.MustCompile(".*"),
+		BranchRegex: regexp.MustCompile("^main$"),
+	})
+	var pull github.PullRequest
+	modelPull := models.PullRequest{BaseRepo: fixtures.GithubRepo, BaseBranch: "foo"}
+	When(githubGetter.GetPullRequest(fixtures.GithubRepo, fixtures.Pull.Num)).ThenReturn(&pull, nil)
+	When(eventParsing.ParseGithubPull(&pull)).ThenReturn(modelPull, modelPull.BaseRepo, fixtures.GithubRepo, nil)
+
+	ch.RunCommentCommand(fixtures.GithubRepo, nil, nil, fixtures.User, fixtures.Pull.Num, &events.CommentCommand{Name: models.PlanCommand})
+	vcsClient.VerifyWasCalled(Never()).CreateComment(matchers.AnyModelsRepo(), AnyInt(), AnyString(), AnyString())
 }
 
 func TestRunUnlockCommand_VCSComment(t *testing.T) {
