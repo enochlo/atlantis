@@ -16,7 +16,7 @@ jobs:
         # We do this instead of setting --default-tf-version because setting
         # that flag starts the download asynchronously so we'd have a race
         # condition.
-        TERRAFORM_VERSION: 1.1.4
+        TERRAFORM_VERSION: 1.2.4
     steps:
     - checkout
     - run: make build-service
@@ -43,26 +43,11 @@ jobs:
         dockerize -wait tcp://localhost:8080 -- \
           muffet \
             -e 'https://github\.com/runatlantis/atlantis/edit/master/.*' \
-            -e 'https://github.com/helm/charts/tree/master/stable/atlantis#customization' \
+            -e 'https://github.com/runatlantis/helm-charts#customization' \
+            --header 'Accept-Encoding:deflate, gzip' \
             --buffer-size 8192 \
             http://localhost:8080/
 
-  # Build and push Docker tag.
-  docker_tag:
-    docker:
-    - image: circleci/golang:1.17 # If you update this, update it in the Makefile too
-    steps:
-    - checkout
-    - run: make build-service
-    - setup_remote_docker
-    - run:
-        name: Build and tag
-        command: |
-          if [ -n "${CIRCLE_TAG}" ]; then
-            docker build -t "runatlantis/atlantis:${CIRCLE_TAG}" .
-            docker login -u "$DOCKER_USER" -p "$DOCKER_PASSWORD"
-            docker push "runatlantis/atlantis:${CIRCLE_TAG}"
-          fi
 workflows:
   version: 2
   branch:
@@ -81,13 +66,3 @@ workflows:
             # the atlantis-e2e-tests context (and also doc PRs).
             ignore: /(pull\/\d+)|(docs\/.*)/
     - website_link_check
-  tag:
-    jobs:
-    - docker_tag:
-        context:
-          - docker-push
-        filters:
-          branches:
-            ignore: /.*/
-          tags:
-            only: /^v.*/

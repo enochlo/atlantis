@@ -46,9 +46,11 @@ type UserConfig struct {
 	GitlabToken                string `mapstructure:"gitlab-token"`
 	GitlabUser                 string `mapstructure:"gitlab-user"`
 	GitlabWebhookSecret        string `mapstructure:"gitlab-webhook-secret"`
+	APISecret                  string `mapstructure:"api-secret"`
 	HidePrevPlanComments       bool   `mapstructure:"hide-prev-plan-comments"`
 	LogLevel                   string `mapstructure:"log-level"`
 	ParallelPoolSize           int    `mapstructure:"parallel-pool-size"`
+	StatsNamespace             string `mapstructure:"stats-namespace"`
 	PlanDrafts                 bool   `mapstructure:"allow-draft-prs"`
 	Port                       int    `mapstructure:"port"`
 	RepoConfig                 string `mapstructure:"repo-config"`
@@ -84,7 +86,9 @@ type UserConfig struct {
 	SSLKeyFile             string          `mapstructure:"ssl-key-file"`
 	TFDownloadURL          string          `mapstructure:"tf-download-url"`
 	TFEHostname            string          `mapstructure:"tfe-hostname"`
+	TFELocalExecutionMode  bool            `mapstructure:"tfe-local-execution-mode"`
 	TFEToken               string          `mapstructure:"tfe-token"`
+	VarFileAllowlist       string          `mapstructure:"var-file-allowlist"`
 	VCSStatusName          string          `mapstructure:"vcs-status-name"`
 	DefaultTFVersion       string          `mapstructure:"default-tf-version"`
 	Webhooks               []WebhookConfig `mapstructure:"webhooks"`

@@ -20,12 +20,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/docker/docker/pkg/fileutils"
 	homedir "github.com/mitchellh/go-homedir"
+	"github.com/moby/moby/pkg/fileutils"
 	"github.com/pkg/errors"
 	"github.com/runatlantis/atlantis/server"
+	"github.com/runatlantis/atlantis/server/core/config/valid"
 	"github.com/runatlantis/atlantis/server/events/vcs/bitbucketcloud"
-	"github.com/runatlantis/atlantis/server/events/yaml/valid"
 	"github.com/runatlantis/atlantis/server/logging"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -77,9 +77,11 @@ const (
 	GitlabTokenFlag            = "gitlab-token"
 	GitlabUserFlag             = "gitlab-user"
 	GitlabWebhookSecretFlag    = "gitlab-webhook-secret" // nolint: gosec
+	APISecretFlag              = "api-secret"
 	HidePrevPlanComments       = "hide-prev-plan-comments"
 	LogLevelFlag               = "log-level"
 	ParallelPoolSize           = "parallel-pool-size"
+	StatsNamespace             = "stats-namespace"
 	AllowDraftPRs              = "allow-draft-prs"
 	PortFlag                   = "port"
 	RepoConfigFlag             = "repo-config"
@@ -100,8 +102,10 @@ const (
 	SSLCertFileFlag            = "ssl-cert-file"
 	SSLKeyFileFlag             = "ssl-key-file"
 	TFDownloadURLFlag          = "tf-download-url"
+	VarFileAllowlistFlag       = "var-file-allowlist"
 	VCSStatusName              = "vcs-status-name"
 	TFEHostnameFlag            = "tfe-hostname"
+	TFELocalExecutionModeFlag  = "tfe-local-execution-mode"
 	TFETokenFlag               = "tfe-token"
 	WriteGitCredsFlag          = "write-git-creds"
 	WebBasicAuthFlag           = "web-basic-auth"
@@ -120,6 +124,7 @@ const (
 	DefaultGitlabHostname   = "gitlab.com"
 	DefaultLogLevel         = "info"
 	DefaultParallelPoolSize = 15
+	DefaultStatsNamespace   = "atlantis"
 	DefaultPort             = 4141
 	DefaultTFDownloadURL    = "https://releases.hashicorp.com"
 	DefaultTFEHostname      = "app.terraform.io"
@@ -255,9 +260,16 @@ var stringFlags = map[string]stringFlag{
 			"This means that an attacker could spoof calls to Atlantis and cause it to perform malicious actions. " +
 			"Should be specified via the ATLANTIS_GITLAB_WEBHOOK_SECRET environment variable.",
 	},
+	APISecretFlag: {
+		description: "Secret to validate requests made to the API",
+	},
 	LogLevelFlag: {
 		description:  "Log level. Either debug, info, warn, or error.",
 		defaultValue: DefaultLogLevel,
+	},
+	StatsNamespace: {
+		description:  "Namespace for aggregating stats.",
+		defaultValue: DefaultStatsNamespace,
 	},
 	RepoConfigFlag: {
 		description: "Path to a repo config file, used to customize how Atlantis runs on each repo. See runatlantis.io/docs for more details.",
@@ -300,6 +312,10 @@ var stringFlags = map[string]stringFlag{
 	DefaultTFVersionFlag: {
 		description: "Terraform version to default to (ex. v0.12.0). Will download if not yet on disk." +
 			" If not set, Atlantis uses the terraform binary in its PATH.",
+	},
+	VarFileAllowlistFlag: {
+		description: "Comma-separated list of additional paths where variable definition files can be read from." +
+			" If this argument is not provided, it defaults to Atlantis' data directory, determined by the --data-dir argument.",
 	},
 	VCSStatusName: {
 		description:  "Name used to identify Atlantis for pull request statuses.",
@@ -409,6 +425,10 @@ var boolFlags = map[string]boolFlag{
 	},
 	SkipCloneNoChanges: {
 		description:  "Skips cloning the PR repo if there are no projects were changed in the PR.",
+		defaultValue: false,
+	},
+	TFELocalExecutionModeFlag: {
+		description:  "Enable if you're using local execution mode (instead of TFE/C's remote execution mode).",
 		defaultValue: false,
 	},
 	WebBasicAuthFlag: {
@@ -603,6 +623,7 @@ func (s *ServerCmd) run() error {
 	if err := s.setDataDir(&userConfig); err != nil {
 		return err
 	}
+	s.setVarFileAllowlist(&userConfig)
 	if err := s.deprecationWarnings(&userConfig); err != nil {
 		return err
 	}
@@ -651,6 +672,9 @@ func (s *ServerCmd) setDefaults(c *server.UserConfig) {
 	}
 	if c.ParallelPoolSize == 0 {
 		c.ParallelPoolSize = DefaultParallelPoolSize
+	}
+	if c.StatsNamespace == "" {
+		c.StatsNamespace = DefaultStatsNamespace
 	}
 	if c.Port == 0 {
 		c.Port = DefaultPort
@@ -803,6 +827,14 @@ func (s *ServerCmd) setDataDir(userConfig *server.UserConfig) error {
 	}
 	userConfig.DataDir = finalPath
 	return nil
+}
+
+// setVarFileAllowlist checks if var-file-allowlist is unassigned and makes it default to data-dir for better backward
+// compatibility.
+func (s *ServerCmd) setVarFileAllowlist(userConfig *server.UserConfig) {
+	if userConfig.VarFileAllowlist == "" {
+		userConfig.VarFileAllowlist = userConfig.DataDir
+	}
 }
 
 // trimAtSymbolFromUsers trims @ from the front of the github and gitlab usernames

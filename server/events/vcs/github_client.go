@@ -24,11 +24,12 @@ import (
 	"github.com/Laisky/graphql"
 	"github.com/google/go-github/v31/github"
 	"github.com/pkg/errors"
+	"github.com/runatlantis/atlantis/server/core/config"
 	"github.com/runatlantis/atlantis/server/events/models"
 	"github.com/runatlantis/atlantis/server/events/vcs/common"
-	"github.com/runatlantis/atlantis/server/events/yaml"
 	"github.com/runatlantis/atlantis/server/logging"
 	"github.com/shurcooL/githubv4"
+	"golang.org/x/oauth2"
 )
 
 // maxCommentLength is the maximum number of chars allowed in a single comment
@@ -40,6 +41,7 @@ type GithubClient struct {
 	user           string
 	client         *github.Client
 	v4MutateClient *graphql.Client
+	v4QueryClient  *githubv4.Client
 	ctx            context.Context
 	logger         logging.SimpleLogging
 }
@@ -91,6 +93,16 @@ func NewGithubClient(hostname string, credentials GithubCredentials, logger logg
 		transport,
 		graphql.WithHeader("Accept", "application/vnd.github.queen-beryl-preview+json"),
 	)
+	token, err := credentials.GetToken()
+	if err != nil {
+		return nil, errors.Wrap(err, "Failed to get GitHub token")
+	}
+	src := oauth2.StaticTokenSource(
+		&oauth2.Token{AccessToken: token},
+	)
+	httpClient := oauth2.NewClient(context.Background(), src)
+	// Use the client from shurcooL's githubv4 library for queries.
+	v4QueryClient := githubv4.NewEnterpriseClient(graphqlURL, httpClient)
 
 	user, err := credentials.GetUser()
 	logger.Debug("GH User: %s", user)
@@ -102,6 +114,7 @@ func NewGithubClient(hostname string, credentials GithubCredentials, logger logg
 		user:           user,
 		client:         client,
 		v4MutateClient: v4MutateClient,
+		v4QueryClient:  v4QueryClient,
 		ctx:            context.Background(),
 		logger:         logger,
 	}, nil
@@ -284,7 +297,7 @@ func (g *GithubClient) PullIsApproved(repo models.Repo, pull models.PullRequest)
 }
 
 // PullIsMergeable returns true if the pull request is mergeable.
-func (g *GithubClient) PullIsMergeable(repo models.Repo, pull models.PullRequest) (bool, error) {
+func (g *GithubClient) PullIsMergeable(repo models.Repo, pull models.PullRequest, vcsstatusname string) (bool, error) {
 	githubPR, err := g.GetPullRequest(repo, pull.Num)
 	if err != nil {
 		return false, errors.Wrap(err, "getting pull request")
@@ -407,30 +420,43 @@ func (g *GithubClient) MarkdownPullLink(pull models.PullRequest) (string, error)
 }
 
 // GetTeamNamesForUser returns the names of the teams or groups that the user belongs to (in the organization the repository belongs to).
-// https://developer.github.com/v3/teams/members/#get-team-membership
+// https://docs.github.com/en/graphql/reference/objects#organization
 func (g *GithubClient) GetTeamNamesForUser(repo models.Repo, user models.User) ([]string, error) {
-	var teamNames []string
-	opts := &github.ListOptions{}
-	org := repo.Owner
-	for {
-		teams, resp, err := g.client.Teams.ListTeams(g.ctx, org, opts)
-		if err != nil {
-			return nil, errors.Wrap(err, "retrieving GitHub teams")
-		}
-		for _, t := range teams {
-			membership, _, err := g.client.Teams.GetTeamMembershipBySlug(g.ctx, org, *t.Slug, user.Username)
-			if err != nil {
-				g.logger.Err("Failed to get team membership from GitHub: %s", err)
-			} else if membership != nil {
-				if *membership.State == "active" && (*membership.Role == "member" || *membership.Role == "maintainer") {
-					teamNames = append(teamNames, t.GetName())
+	orgName := repo.Owner
+	variables := map[string]interface{}{
+		"orgName":    githubv4.String(orgName),
+		"userLogins": []githubv4.String{githubv4.String(user.Username)},
+		"teamCursor": (*githubv4.String)(nil),
+	}
+	var q struct {
+		Organization struct {
+			Teams struct {
+				Edges []struct {
+					Node struct {
+						Name string
+					}
 				}
-			}
+				PageInfo struct {
+					EndCursor   githubv4.String
+					HasNextPage bool
+				}
+			} `graphql:"teams(first:100, after: $teamCursor, userLogins: $userLogins)"`
+		} `graphql:"organization(login: $orgName)"`
+	}
+	var teamNames []string
+	ctx := context.Background()
+	for {
+		err := g.v4QueryClient.Query(ctx, &q, variables)
+		if err != nil {
+			return nil, err
 		}
-		if resp.NextPage == 0 {
+		for _, edge := range q.Organization.Teams.Edges {
+			teamNames = append(teamNames, edge.Node.Name)
+		}
+		if !q.Organization.Teams.PageInfo.HasNextPage {
 			break
 		}
-		opts.Page = resp.NextPage
+		variables["teamCursor"] = githubv4.NewString(q.Organization.Teams.PageInfo.EndCursor)
 	}
 	return teamNames, nil
 }
@@ -455,7 +481,7 @@ func (g *GithubClient) ExchangeCode(code string) (*GithubAppTemporarySecrets, er
 // if BaseRepo had one repo config file, its content will placed on the second return value
 func (g *GithubClient) DownloadRepoConfigFile(pull models.PullRequest) (bool, []byte, error) {
 	opt := github.RepositoryContentGetOptions{Ref: pull.HeadBranch}
-	fileContent, _, resp, err := g.client.Repositories.GetContents(g.ctx, pull.BaseRepo.Owner, pull.BaseRepo.Name, yaml.AtlantisYAMLFilename, &opt)
+	fileContent, _, resp, err := g.client.Repositories.GetContents(g.ctx, pull.BaseRepo.Owner, pull.BaseRepo.Name, config.AtlantisYAMLFilename, &opt)
 
 	if resp.StatusCode == http.StatusNotFound {
 		return false, []byte{}, nil
@@ -474,4 +500,13 @@ func (g *GithubClient) DownloadRepoConfigFile(pull models.PullRequest) (bool, []
 
 func (g *GithubClient) SupportsSingleFileDownload(repo models.Repo) bool {
 	return true
+}
+
+func (g *GithubClient) GetCloneURL(VCSHostType models.VCSHostType, repo string) (string, error) {
+	parts := strings.Split(repo, "/")
+	repository, _, err := g.client.Repositories.Get(g.ctx, parts[0], parts[1])
+	if err != nil {
+		return "", err
+	}
+	return repository.GetCloneURL(), nil
 }

@@ -13,9 +13,10 @@ import (
 	. "github.com/petergtz/pegomock"
 	"github.com/pkg/errors"
 	"github.com/runatlantis/atlantis/server/core/runtime"
-	"github.com/runatlantis/atlantis/server/core/terraform"
+	runtimemodels "github.com/runatlantis/atlantis/server/core/runtime/models"
 	"github.com/runatlantis/atlantis/server/core/terraform/mocks"
 	matchers2 "github.com/runatlantis/atlantis/server/core/terraform/mocks/matchers"
+	"github.com/runatlantis/atlantis/server/events/command"
 	mocks2 "github.com/runatlantis/atlantis/server/events/mocks"
 	"github.com/runatlantis/atlantis/server/events/mocks/matchers"
 	"github.com/runatlantis/atlantis/server/events/models"
@@ -28,7 +29,7 @@ func TestRun_NoDir(t *testing.T) {
 	o := runtime.ApplyStepRunner{
 		TerraformExecutor: nil,
 	}
-	_, err := o.Run(models.ProjectCommandContext{
+	_, err := o.Run(command.ProjectContext{
 		RepoRelDir: ".",
 		Workspace:  "workspace",
 	}, nil, "/nonexistent/path", map[string]string(nil))
@@ -41,7 +42,7 @@ func TestRun_NoPlanFile(t *testing.T) {
 	o := runtime.ApplyStepRunner{
 		TerraformExecutor: nil,
 	}
-	_, err := o.Run(models.ProjectCommandContext{
+	_, err := o.Run(command.ProjectContext{
 		RepoRelDir: ".",
 		Workspace:  "workspace",
 	}, nil, tmpDir, map[string]string(nil))
@@ -54,7 +55,7 @@ func TestRun_Success(t *testing.T) {
 	planPath := filepath.Join(tmpDir, "workspace.tfplan")
 	err := ioutil.WriteFile(planPath, nil, 0600)
 	logger := logging.NewNoopLogger(t)
-	ctx := models.ProjectCommandContext{
+	ctx := command.ProjectContext{
 		Log:                logger,
 		Workspace:          "workspace",
 		RepoRelDir:         ".",
@@ -86,7 +87,7 @@ func TestRun_AppliesCorrectProjectPlan(t *testing.T) {
 	err := ioutil.WriteFile(planPath, nil, 0600)
 
 	logger := logging.NewNoopLogger(t)
-	ctx := models.ProjectCommandContext{
+	ctx := command.ProjectContext{
 		Log:                logger,
 		Workspace:          "default",
 		RepoRelDir:         ".",
@@ -120,7 +121,7 @@ func TestRun_UsesConfiguredTFVersion(t *testing.T) {
 
 	logger := logging.NewNoopLogger(t)
 	tfVersion, _ := version.NewVersion("0.11.0")
-	ctx := models.ProjectCommandContext{
+	ctx := command.ProjectContext{
 		Workspace:          "workspace",
 		RepoRelDir:         ".",
 		EscapedCommentArgs: []string{"comment", "args"},
@@ -209,7 +210,7 @@ func TestRun_UsingTarget(t *testing.T) {
 				TerraformExecutor: terraform,
 			}
 
-			output, err := step.Run(models.ProjectCommandContext{
+			output, err := step.Run(command.ProjectContext{
 				Log:                logger,
 				Workspace:          "workspace",
 				RepoRelDir:         ".",
@@ -253,7 +254,7 @@ Plan: 0 to add, 0 to change, 1 to destroy.`
 		CommitStatusUpdater: updater,
 	}
 	tfVersion, _ := version.NewVersion("0.11.0")
-	ctx := models.ProjectCommandContext{
+	ctx := command.ProjectContext{
 		Log:                logging.NewNoopLogger(t),
 		Workspace:          "workspace",
 		RepoRelDir:         ".",
@@ -279,8 +280,8 @@ Apply complete! Resources: 0 added, 0 changed, 1 destroyed.
 
 	// Check that the status was updated with the run url.
 	runURL := "https://app.terraform.io/app/lkysow-enterprises/atlantis-tfe-test-dir2/runs/run-PiDsRYKGcerTttV2"
-	updater.VerifyWasCalledOnce().UpdateProject(ctx, models.ApplyCommand, models.PendingCommitStatus, runURL)
-	updater.VerifyWasCalledOnce().UpdateProject(ctx, models.ApplyCommand, models.SuccessCommitStatus, runURL)
+	updater.VerifyWasCalledOnce().UpdateProject(ctx, command.Apply, models.PendingCommitStatus, runURL)
+	updater.VerifyWasCalledOnce().UpdateProject(ctx, command.Apply, models.SuccessCommitStatus, runURL)
 }
 
 // Test that if the plan is different, we error out.
@@ -315,7 +316,7 @@ Plan: 0 to add, 0 to change, 1 to destroy.`
 	}
 	tfVersion, _ := version.NewVersion("0.11.0")
 
-	output, err := o.Run(models.ProjectCommandContext{
+	output, err := o.Run(command.ProjectContext{
 		Log:                logging.NewNoopLogger(t),
 		Workspace:          "workspace",
 		RepoRelDir:         ".",
@@ -370,11 +371,11 @@ type remoteApplyMock struct {
 }
 
 // RunCommandAsync fakes out running terraform async.
-func (r *remoteApplyMock) RunCommandAsync(ctx models.ProjectCommandContext, path string, args []string, envs map[string]string, v *version.Version, workspace string) (chan<- string, <-chan terraform.Line) {
+func (r *remoteApplyMock) RunCommandAsync(ctx command.ProjectContext, path string, args []string, envs map[string]string, v *version.Version, workspace string) (chan<- string, <-chan runtimemodels.Line) {
 	r.CalledArgs = args
 
 	in := make(chan string)
-	out := make(chan terraform.Line)
+	out := make(chan runtimemodels.Line)
 
 	// We use a wait group to ensure our sending and receiving routines have
 	// completed.
@@ -397,10 +398,10 @@ func (r *remoteApplyMock) RunCommandAsync(ctx models.ProjectCommandContext, path
 	// Asynchronously send the lines we're supposed to.
 	go func() {
 		for _, line := range strings.Split(r.LinesToSend, "\n") {
-			out <- terraform.Line{Line: line}
+			out <- runtimemodels.Line{Line: line}
 		}
 		if r.Err != nil {
-			out <- terraform.Line{Err: r.Err}
+			out <- runtimemodels.Line{Err: r.Err}
 		}
 		close(out)
 		wg.Done()

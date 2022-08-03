@@ -164,7 +164,7 @@ If using the server `repos.yaml` file, you would use the following config:
 
 ```yaml
 # repos.yaml
-# Specify TERRAGRUNT_TFPATH environment variable to accomodate setting --default-tf-version
+# Specify TERRAGRUNT_TFPATH environment variable to accommodate setting --default-tf-version
 # Generate json plan via terragrunt for policy checks
 repos:
 - id: "/.*/"
@@ -176,14 +176,14 @@ workflows:
       - env:
           name: TERRAGRUNT_TFPATH
           command: 'echo "terraform${ATLANTIS_TERRAFORM_VERSION}"'
-      - run: terragrunt plan -out=$PLANFILE
+      - run: terragrunt plan -input=false -out=$PLANFILE
       - run: terragrunt show -json $PLANFILE > $SHOWFILE
     apply:
       steps:
       - env:
           name: TERRAGRUNT_TFPATH
           command: 'echo "terraform${ATLANTIS_TERRAFORM_VERSION}"'
-      - run: terragrunt apply $PLANFILE
+      - run: terragrunt apply -input=false $PLANFILE
 ```
 
 If using the repo's `atlantis.yaml` file you would use the following config:
@@ -407,3 +407,24 @@ as the environment variable value.
 * `env` `command`'s can use any of the built-in environment variables available
   to `run` commands. 
 :::
+
+#### Multiple Environment Variables `multienv` Command
+The `multienv` command allows you to set dynamic number of multiple environment variables that will be available
+to all steps defined **below** the `multienv` step.
+```yaml
+- multienv: custom-command
+```
+| Key      | Type   | Default | Required | Description                                   |
+|----------|--------|---------|----------|-----------------------------------------------|
+| multienv | string | none    | no       | Run a custom command and add set              |
+|          |        |         |          | environment variables according to the result |
+The result of the executed command must have a fixed format:
+EnvVar1Name=value1,EnvVar2Name=value2,EnvVar3Name=value3
+
+The name-value pairs in the result are added as environment variables if success is true otherwise the workflow execution stops with error and the errorMessage is getting displayed.
+
+::: tip Notes
+* `multienv` `command`'s can use any of the built-in environment variables available
+  to `run` commands. 
+:::
+

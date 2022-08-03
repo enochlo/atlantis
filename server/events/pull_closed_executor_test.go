@@ -19,19 +19,19 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/runatlantis/atlantis/server/core/db"
-	"github.com/runatlantis/atlantis/server/handlers"
+	"github.com/runatlantis/atlantis/server/jobs"
 	"github.com/stretchr/testify/assert"
 	bolt "go.etcd.io/bbolt"
 
 	. "github.com/petergtz/pegomock"
 	lockmocks "github.com/runatlantis/atlantis/server/core/locking/mocks"
 	"github.com/runatlantis/atlantis/server/events"
+	"github.com/runatlantis/atlantis/server/events/command"
 	"github.com/runatlantis/atlantis/server/events/mocks"
 	"github.com/runatlantis/atlantis/server/events/mocks/matchers"
 	"github.com/runatlantis/atlantis/server/events/models"
 	"github.com/runatlantis/atlantis/server/events/models/fixtures"
 	vcsmocks "github.com/runatlantis/atlantis/server/events/vcs/mocks"
-	handlermocks "github.com/runatlantis/atlantis/server/handlers/mocks"
 	loggermocks "github.com/runatlantis/atlantis/server/logging/mocks"
 	. "github.com/runatlantis/atlantis/testing"
 )
@@ -194,13 +194,11 @@ func TestCleanUpLogStreaming(t *testing.T) {
 	RegisterMockTestingT(t)
 
 	t.Run("Should Clean Up Log Streaming Resources When PR is closed", func(t *testing.T) {
-		prjStatusUpdater := handlermocks.NewMockProjectStatusUpdater()
-		prjJobURLGenerator := handlermocks.NewMockProjectJobURLGenerator()
 
 		// Create Log streaming resources
-		prjCmdOutput := make(chan *models.ProjectCmdOutputLine)
-		prjCmdOutHandler := handlers.NewAsyncProjectCommandOutputHandler(prjCmdOutput, prjStatusUpdater, prjJobURLGenerator, logger)
-		ctx := models.ProjectCommandContext{
+		prjCmdOutput := make(chan *jobs.ProjectCmdOutputLine)
+		prjCmdOutHandler := jobs.NewAsyncProjectCommandOutputHandler(prjCmdOutput, logger)
+		ctx := command.ProjectContext{
 			BaseRepo:    fixtures.GithubRepo,
 			Pull:        fixtures.Pull,
 			ProjectName: *fixtures.Project.Name,
@@ -208,7 +206,7 @@ func TestCleanUpLogStreaming(t *testing.T) {
 		}
 
 		go prjCmdOutHandler.Handle()
-		prjCmdOutHandler.Send(ctx, "Test Message")
+		prjCmdOutHandler.Send(ctx, "Test Message", false)
 
 		// Create boltdb and add pull request.
 		var lockBucket = "bucket"
@@ -236,7 +234,7 @@ func TestCleanUpLogStreaming(t *testing.T) {
 			panic(errors.Wrap(err, "could not create bucket"))
 		}
 		db, _ := db.NewWithDB(boltDB, lockBucket, configBucket)
-		result := []models.ProjectResult{
+		result := []command.ProjectResult{
 			{
 				RepoRelDir:  fixtures.GithubRepo.FullName,
 				Workspace:   "default",
@@ -281,7 +279,7 @@ func TestCleanUpLogStreaming(t *testing.T) {
 		Equals(t, expectedComment, comment)
 
 		// Assert log streaming resources are cleaned up.
-		dfPrjCmdOutputHandler := prjCmdOutHandler.(*handlers.AsyncProjectCommandOutputHandler)
+		dfPrjCmdOutputHandler := prjCmdOutHandler.(*jobs.AsyncProjectCommandOutputHandler)
 		assert.Empty(t, dfPrjCmdOutputHandler.GetProjectOutputBuffer(ctx.PullInfo()))
 		assert.Empty(t, dfPrjCmdOutputHandler.GetReceiverBufferForPull(ctx.PullInfo()))
 	})
